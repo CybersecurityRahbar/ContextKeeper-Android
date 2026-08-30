@@ -1,6 +1,10 @@
 package com.cyberphantom.contextkeeper
 
 import android.accessibilityservice.AccessibilityService
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
@@ -22,6 +26,25 @@ class ConversationAccessibilityService : AccessibilityService() {
     private var overlayView: TextView? = null
     private var overlayParams: WindowManager.LayoutParams? = null
     private var windowManager: WindowManager? = null
+    private var overlayReceiverRegistered = false
+
+    private val overlayReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ACTION_OVERLAY_CHANGED) updateOverlay()
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        val filter = IntentFilter(ACTION_OVERLAY_CHANGED)
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(overlayReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(overlayReceiver, filter)
+        }
+        overlayReceiverRegistered = true
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -38,8 +61,7 @@ class ConversationAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null) return
-        if (event.packageName?.toString() != CHATGPT_PACKAGE) return
+        if (event == null || event.packageName?.toString() != CHATGPT_PACKAGE) return
         if (!CaptureStore.isRecording(this)) {
             stopPolling()
             updateOverlayText()
@@ -64,9 +86,7 @@ class ConversationAccessibilityService : AccessibilityService() {
     }
 
     private fun scheduleCapture(delayMs: Long) {
-        handler.postDelayed({
-            if (CaptureStore.isRecording(this)) captureNow()
-        }, delayMs)
+        handler.postDelayed({ if (CaptureStore.isRecording(this)) captureNow() }, delayMs)
     }
 
     private fun startPollingIfNeeded() {
@@ -96,14 +116,13 @@ class ConversationAccessibilityService : AccessibilityService() {
         val root = try {
             if (android.os.Build.VERSION.SDK_INT >= 33) {
                 getRootInActiveWindow(AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID)
-            } else {
-                rootInActiveWindow
-            }
+            } else rootInActiveWindow
         } catch (_: Throwable) {
             rootInActiveWindow
         } ?: return
 
         try {
+            if (root.packageName?.toString() != CHATGPT_PACKAGE) return
             val segments = ConversationExtractor.extract(root)
             if (segments.isEmpty()) return
 
@@ -122,6 +141,8 @@ class ConversationAccessibilityService : AccessibilityService() {
             for (segment in segments) {
                 CaptureQueue.enqueue(this, sessionId, segment.role, segment.text)
             }
+        } catch (_: Throwable) {
+            // A malformed/in-flight accessibility tree must not terminate the service.
         } finally {
             try { root.recycle() } catch (_: Throwable) { }
         }
@@ -145,6 +166,7 @@ class ConversationAccessibilityService : AccessibilityService() {
             contentDescription = "Context Keeper: بدء أو إيقاف الالتقاط"
             isClickable = true
             isFocusable = true
+
             setOnClickListener {
                 val newValue = !CaptureStore.isRecording(this@ConversationAccessibilityService)
                 CaptureStore.setRecording(this@ConversationAccessibilityService, newValue)
@@ -161,6 +183,7 @@ class ConversationAccessibilityService : AccessibilityService() {
                 }
                 updateOverlayText()
             }
+
             setOnLongClickListener {
                 CaptureStore.newSession(this@ConversationAccessibilityService)
                 lastSessionId = CaptureStore.currentSessionId(this@ConversationAccessibilityService)
@@ -245,12 +268,17 @@ class ConversationAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         stopPolling()
         hideOverlay()
+        if (overlayReceiverRegistered) {
+            try { unregisterReceiver(overlayReceiver) } catch (_: Throwable) { }
+            overlayReceiverRegistered = false
+        }
         super.onDestroy()
     }
 
     companion object {
         private const val CHATGPT_PACKAGE = "com.openai.chatgpt"
         private const val POLL_INTERVAL_MS = 75L
+        private const val ACTION_OVERLAY_CHANGED = "com.cyberphantom.contextkeeper.ACTION_OVERLAY_CHANGED"
     }
 }
 
