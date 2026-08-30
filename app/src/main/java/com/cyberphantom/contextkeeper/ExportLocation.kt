@@ -13,6 +13,15 @@ object ExportLocation {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_TREE_URI, null)?.let(Uri::parse)
 
+    /** Backward-compatible save used by the current Activity. */
+    fun save(context: Context, uri: Uri) {
+        save(
+            context,
+            uri,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        )
+    }
+
     fun save(context: Context, uri: Uri, grantFlags: Int) {
         val persistable = grantFlags and
             (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
