@@ -4,7 +4,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import java.io.OutputStreamWriter
-import java.security.MessageDigest
+import java.util.UUID
 
 /** Thread-safe facade over SQLite and user-selected document storage. */
 object CaptureStore {
@@ -50,21 +50,13 @@ object CaptureStore {
         return id
     }
 
-    fun addOrUpdate(context: Context, role: String, text: String): Boolean =
-        if (isRecording(context)) addCaptured(context, currentSessionId(context), role, text) else false
-
     @Synchronized
-    internal fun addOrUpdate(context: Context, sessionId: String, role: String, text: String): Boolean =
-        addCaptured(context, sessionId, role, text)
-
-    @Synchronized
-    private fun addCaptured(context: Context, sessionId: String, role: String, text: String): Boolean {
+    internal fun addOrUpdate(context: Context, sessionId: String, role: String, text: String): Boolean {
         val clean = normalize(text)
         if (clean.length < MIN_TEXT_LENGTH) return false
-        val id = sha256(role + "\u0000" + clean)
-        return CaptureDatabase.get(context).insertOrTouch(
+        return CaptureDatabase.get(context).insertOrMerge(
             sessionId = sessionId,
-            id = id,
+            id = UUID.randomUUID().toString(),
             role = role,
             text = clean,
             now = System.currentTimeMillis()
@@ -75,8 +67,8 @@ object CaptureStore {
     fun messageCount(context: Context): Int =
         CaptureDatabase.get(context).count(currentSessionId(context))
 
-    fun exportMarkdownTo(context: Context, treeUri: Uri): Uri {
-        return exportToDocument(context, treeUri, "text/markdown", "md") { writer, session ->
+    fun exportMarkdownTo(context: Context, treeUri: Uri): Uri =
+        exportToDocument(context, treeUri, "text/markdown", "md") { writer, session ->
             writer.appendLine("# Chat Context")
             writer.appendLine()
             writer.appendLine("Session: $session")
@@ -91,10 +83,9 @@ object CaptureStore {
                 writer.appendLine()
             }
         }
-    }
 
-    fun exportJsonTo(context: Context, treeUri: Uri): Uri {
-        return exportToDocument(context, treeUri, "application/json", "json") { writer, session ->
+    fun exportJsonTo(context: Context, treeUri: Uri): Uri =
+        exportToDocument(context, treeUri, "application/json", "json") { writer, session ->
             writer.append('[')
             var first = true
             CaptureDatabase.get(context).readSession(session) { message ->
@@ -106,7 +97,6 @@ object CaptureStore {
             if (!first) writer.append('\n')
             writer.append(']')
         }
-    }
 
     private fun exportToDocument(
         context: Context,
@@ -122,27 +112,17 @@ object CaptureStore {
         if (!tree.isDirectory || !tree.canWrite()) {
             throw IllegalStateException("لا يمكن الكتابة إلى المجلد المحدد. اختر مجلدًا آخر.")
         }
-
-        val existing = tree.findFile(name)
-        val target = existing ?: tree.createFile(mimeType, name)
+        val target = tree.findFile(name) ?: tree.createFile(mimeType, name)
             ?: throw IllegalStateException("تعذر إنشاء الملف داخل المجلد المحدد")
-
         context.contentResolver.openOutputStream(target.uri, "wt")?.use { output ->
             OutputStreamWriter(output, Charsets.UTF_8).use { writer ->
                 writeContent(writer, session)
                 writer.flush()
             }
         } ?: throw IllegalStateException("تعذر فتح الملف للكتابة")
-
         return target.uri
     }
 
     private fun normalize(value: String): String =
         value.replace("\u00A0", " ").trim()
-
-    private fun sha256(value: String): String {
-        val md = MessageDigest.getInstance("SHA-256")
-        return md.digest(value.toByteArray(Charsets.UTF_8))
-            .joinToString("") { "%02x".format(it) }
-    }
 }
