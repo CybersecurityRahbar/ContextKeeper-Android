@@ -12,8 +12,10 @@ android {
         applicationId = "com.cyberphantom.contextkeeper"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.6.0"
+        versionCode = 7
+        versionName = "0.7.0"
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     compileOptions {
@@ -29,6 +31,7 @@ kotlin {
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.17.0")
+    implementation("androidx.core:core-ktx:1.19.0")
     implementation("androidx.appcompat:appcompat:1.8.0")
+    implementation("androidx.documentfile:documentfile:1.1.0")
 }
