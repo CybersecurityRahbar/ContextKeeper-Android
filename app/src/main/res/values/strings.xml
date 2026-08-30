@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Context Keeper</string>
+    <string name="accessibility_label">Context Keeper capture service</string>
+    <string name="accessibility_description">Captures visible conversation text from supported apps while you scroll.</string>
+</resources>
