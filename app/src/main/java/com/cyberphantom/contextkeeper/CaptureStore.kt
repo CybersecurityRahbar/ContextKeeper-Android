@@ -4,7 +4,6 @@ import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
 import java.io.OutputStreamWriter
-import org.json.JSONObject
 import java.security.MessageDigest
 
 /** Thread-safe facade over SQLite and user-selected document storage. */
@@ -12,6 +11,7 @@ object CaptureStore {
     private const val PREFS = "context_keeper"
     private const val SESSION_ID = "session_id"
     private const val RECORDING = "recording"
+    private const val OVERLAY_ENABLED = "overlay_enabled"
     private const val MIN_TEXT_LENGTH = 2
 
     @Synchronized
@@ -23,6 +23,17 @@ object CaptureStore {
     fun setRecording(context: Context, value: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putBoolean(RECORDING, value).apply()
+    }
+
+    @Synchronized
+    fun isOverlayEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(OVERLAY_ENABLED, false)
+
+    @Synchronized
+    fun setOverlayEnabled(context: Context, value: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(OVERLAY_ENABLED, value).apply()
     }
 
     @Synchronized
