@@ -58,18 +58,15 @@ class MainActivity : AppCompatActivity() {
             text = "يلتقط نص ChatGPT أثناء الظهور والتمرير، ويحفظه تدريجيًا دون تكرار."
             textSize = 16f
         }, lp())
-        status = TextView(this).apply { textSize = 16f }
-        root.addView(status, lp())
-        count = TextView(this).apply { textSize = 16f }
-        root.addView(count, lp())
-        exportPath = TextView(this).apply { textSize = 14f }
-        root.addView(exportPath, lp())
+        status = TextView(this).apply { textSize = 16f }; root.addView(status, lp())
+        count = TextView(this).apply { textSize = 16f }; root.addView(count, lp())
+        exportPath = TextView(this).apply { textSize = 14f }; root.addView(exportPath, lp())
 
-        recordingToggle = Switch(this).apply { text = "تشغيل التسجيل" }
+        recordingToggle = Switch(this).apply { text = "تشغيل / إيقاف الالتقاط" }
         root.addView(recordingToggle, lp())
         recordingToggle.setOnCheckedChangeListener { _, checked ->
+            // This is pause/resume. It never creates a new session.
             CaptureStore.setRecording(this@MainActivity, checked)
-            if (checked) CaptureStore.newSession(this@MainActivity)
             refresh()
         }
 
@@ -98,10 +95,9 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { exportJson() }
         }, lp())
         root.addView(Button(this).apply {
-            text = "جلسة جديدة"
+            text = "جلسة جديدة (لا تحذف السابقة)"
             setOnClickListener {
                 CaptureStore.newSession(this@MainActivity)
-                sendOverlayChanged()
                 refresh()
             }
         }, lp())
@@ -116,7 +112,6 @@ class MainActivity : AppCompatActivity() {
         recordingToggle.isChecked = CaptureStore.isRecording(this)
         recordingToggle.setOnCheckedChangeListener { _, checked ->
             CaptureStore.setRecording(this@MainActivity, checked)
-            if (checked) CaptureStore.newSession(this@MainActivity)
             refresh()
         }
 
@@ -163,7 +158,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun ensureExportFolder(kind: PendingExport): Uri? {
         val uri = ExportLocation.get(this)
-        if (uri != null) return uri
+        if (uri != null && ExportLocation.isUsable(this)) return uri
         pendingExport = kind
         Toast.makeText(this, "اختر مجلدًا لحفظ ملفات السياق، مثل Downloads", Toast.LENGTH_LONG).show()
         chooseExportFolder()
