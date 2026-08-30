@@ -39,14 +39,16 @@ object CaptureStore {
     }
 
     fun addOrUpdate(context: Context, role: String, text: String): Boolean =
-        addOrUpdate(context, currentSessionId(context), role, text)
+        if (isRecording(context)) addCaptured(context, currentSessionId(context), role, text) else false
 
     @Synchronized
-    fun addOrUpdate(context: Context, sessionId: String, role: String, text: String): Boolean {
-        if (!isRecording(context)) return false
+    internal fun addOrUpdate(context: Context, sessionId: String, role: String, text: String): Boolean =
+        addCaptured(context, sessionId, role, text)
+
+    @Synchronized
+    private fun addCaptured(context: Context, sessionId: String, role: String, text: String): Boolean {
         val clean = normalize(text)
         if (clean.length < MIN_TEXT_LENGTH) return false
-
         val id = sha256(role + "\u0000" + clean)
         return CaptureDatabase.get(context).insertOrTouch(
             sessionId = sessionId,
@@ -87,9 +89,18 @@ object CaptureStore {
     fun exportJson(context: Context): File {
         val session = currentSessionId(context)
         val out = exportDir(context).resolve("$session.json")
-        val array = JSONArray()
-        CaptureDatabase.get(context).readSession(session) { message -> array.put(message.toJson()) }
-        out.writeText(array.toString(2), Charsets.UTF_8)
+        out.bufferedWriter(Charsets.UTF_8).use { writer ->
+            writer.append('[')
+            var first = true
+            CaptureDatabase.get(context).readSession(session) { message ->
+                if (!first) writer.append(',')
+                writer.newLine()
+                writer.append(message.toJson().toString())
+                first = false
+            }
+            if (!first) writer.newLine()
+            writer.append(']')
+        }
         return out
     }
 
