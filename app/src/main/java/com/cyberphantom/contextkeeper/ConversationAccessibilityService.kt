@@ -1,24 +1,27 @@
 package com.cyberphantom.contextkeeper
 
 import android.accessibilityservice.AccessibilityService
+import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.WindowManager
+import android.widget.TextView
+import android.widget.Toast
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
-/**
- * High-reliability capture loop.
- *
- * Accessibility callbacks are event-driven, so fast scrolling can produce UI
- * states between callbacks. While recording, a polling loop also samples the
- * active window, while scroll/content events trigger immediate and delayed
- * snapshots.
- */
+/** Continuous capture service for ChatGPT plus an optional floating control. */
 class ConversationAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private var lastSnapshotFingerprint = ""
+    private var lastSessionId = ""
     private var lastEventAt = 0L
     private var polling = false
+    private var overlayView: TextView? = null
+    private var overlayParams: WindowManager.LayoutParams? = null
+    private var windowManager: WindowManager? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -29,29 +32,41 @@ class ConversationAccessibilityService : AccessibilityService() {
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
                 AccessibilityEvent.TYPE_WINDOWS_CHANGED
         }
-        startPollingIfNeeded()
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        updateOverlay()
+        if (CaptureStore.isRecording(this)) startPollingIfNeeded()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null || !CaptureStore.isRecording(this)) {
-            if (!CaptureStore.isRecording(this)) stopPolling()
+        if (event == null) return
+        if (event.packageName?.toString() != CHATGPT_PACKAGE) return
+        if (!CaptureStore.isRecording(this)) {
+            stopPolling()
+            updateOverlayText()
             return
         }
-        if (event.packageName?.toString() != CHATGPT_PACKAGE) return
 
         val now = System.currentTimeMillis()
         val isScroll = event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED
         val isContent = event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
-        if (isContent && now - lastEventAt < 20L) return
+        if (isContent && now - lastEventAt < 15L) return
         lastEventAt = now
 
         captureNow()
         if (isScroll || isContent) {
-            handler.postDelayed({ captureIfRecording() }, 45L)
-            handler.postDelayed({ captureIfRecording() }, 110L)
-            handler.postDelayed({ captureIfRecording() }, 220L)
+            scheduleCapture(30L)
+            scheduleCapture(75L)
+            scheduleCapture(140L)
+            scheduleCapture(240L)
         }
+        updateOverlayText()
         startPollingIfNeeded()
+    }
+
+    private fun scheduleCapture(delayMs: Long) {
+        handler.postDelayed({
+            if (CaptureStore.isRecording(this)) captureNow()
+        }, delayMs)
     }
 
     private fun startPollingIfNeeded() {
@@ -64,6 +79,7 @@ class ConversationAccessibilityService : AccessibilityService() {
         override fun run() {
             if (!CaptureStore.isRecording(this@ConversationAccessibilityService)) {
                 polling = false
+                updateOverlayText()
                 return
             }
             captureNow()
@@ -74,10 +90,6 @@ class ConversationAccessibilityService : AccessibilityService() {
     private fun stopPolling() {
         polling = false
         handler.removeCallbacks(pollRunnable)
-    }
-
-    private fun captureIfRecording() {
-        if (CaptureStore.isRecording(this)) captureNow()
     }
 
     private fun captureNow() {
@@ -95,27 +107,144 @@ class ConversationAccessibilityService : AccessibilityService() {
             val segments = ConversationExtractor.extract(root)
             if (segments.isEmpty()) return
 
+            val sessionId = CaptureStore.currentSessionId(this)
+            if (sessionId != lastSessionId) {
+                lastSessionId = sessionId
+                lastSnapshotFingerprint = ""
+            }
+
             val fingerprint = CaptureFingerprint.sha256(
                 segments.joinToString("\n\u0000") { "${it.role}:${it.text}" }
             )
             if (fingerprint == lastSnapshotFingerprint) return
             lastSnapshotFingerprint = fingerprint
 
-            val sessionId = CaptureStore.currentSessionId(this)
             for (segment in segments) {
                 CaptureQueue.enqueue(this, sessionId, segment.role, segment.text)
             }
         } finally {
-            root.recycle()
+            try { root.recycle() } catch (_: Throwable) { }
         }
+    }
+
+    private fun updateOverlay() {
+        if (CaptureStore.isOverlayEnabled(this)) showOverlay() else hideOverlay()
+        updateOverlayText()
+    }
+
+    private fun showOverlay() {
+        if (overlayView != null) return
+        val wm = windowManager ?: return
+        val size = (52 * resources.displayMetrics.density).toInt()
+        val bubble = TextView(this).apply {
+            text = if (CaptureStore.isRecording(this@ConversationAccessibilityService)) "●" else "▶"
+            textSize = 21f
+            gravity = Gravity.CENTER
+            setTextColor(android.graphics.Color.WHITE)
+            setBackgroundColor(android.graphics.Color.rgb(32, 33, 36))
+            contentDescription = "Context Keeper: بدء أو إيقاف الالتقاط"
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                val newValue = !CaptureStore.isRecording(this@ConversationAccessibilityService)
+                CaptureStore.setRecording(this@ConversationAccessibilityService, newValue)
+                if (newValue) {
+                    CaptureStore.newSession(this@ConversationAccessibilityService)
+                    lastSessionId = CaptureStore.currentSessionId(this@ConversationAccessibilityService)
+                    lastSnapshotFingerprint = ""
+                    startPollingIfNeeded()
+                    captureNow()
+                    Toast.makeText(this@ConversationAccessibilityService, "بدأ الالتقاط", Toast.LENGTH_SHORT).show()
+                } else {
+                    stopPolling()
+                    Toast.makeText(this@ConversationAccessibilityService, "توقف الالتقاط", Toast.LENGTH_SHORT).show()
+                }
+                updateOverlayText()
+            }
+            setOnLongClickListener {
+                CaptureStore.newSession(this@ConversationAccessibilityService)
+                lastSessionId = CaptureStore.currentSessionId(this@ConversationAccessibilityService)
+                lastSnapshotFingerprint = ""
+                if (CaptureStore.isRecording(this@ConversationAccessibilityService)) captureNow()
+                Toast.makeText(this@ConversationAccessibilityService, "جلسة جديدة", Toast.LENGTH_SHORT).show()
+                true
+            }
+
+            var downX = 0f
+            var downY = 0f
+            var startX = 0
+            var startY = 0
+            var moving = false
+            setOnTouchListener { view, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        downX = event.rawX
+                        downY = event.rawY
+                        startX = overlayParams?.x ?: 0
+                        startY = overlayParams?.y ?: 0
+                        moving = false
+                        false
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val dx = (event.rawX - downX).toInt()
+                        val dy = (event.rawY - downY).toInt()
+                        if (kotlin.math.abs(dx) > 8 || kotlin.math.abs(dy) > 8) {
+                            moving = true
+                            overlayParams?.let {
+                                it.x = startX + dx
+                                it.y = startY + dy
+                                try { wm.updateViewLayout(view, it) } catch (_: Throwable) { }
+                            }
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_UP -> moving
+                    else -> false
+                }
+            }
+        }
+
+        val params = WindowManager.LayoutParams(
+            size,
+            size,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = (12 * resources.displayMetrics.density).toInt()
+            y = (140 * resources.displayMetrics.density).toInt()
+        }
+
+        try {
+            wm.addView(bubble, params)
+            overlayView = bubble
+            overlayParams = params
+        } catch (_: Throwable) {
+            overlayView = null
+            overlayParams = null
+        }
+    }
+
+    private fun hideOverlay() {
+        val view = overlayView ?: return
+        try { windowManager?.removeView(view) } catch (_: Throwable) { }
+        overlayView = null
+        overlayParams = null
+    }
+
+    private fun updateOverlayText() {
+        overlayView?.text = if (CaptureStore.isRecording(this)) "●" else "▶"
     }
 
     override fun onInterrupt() {
         stopPolling()
+        hideOverlay()
     }
 
     override fun onDestroy() {
         stopPolling()
+        hideOverlay()
         super.onDestroy()
     }
 
