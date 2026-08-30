@@ -3,8 +3,6 @@ package com.cyberphantom.contextkeeper
 import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
-import android.os.Environment
-import java.io.File
 import java.io.OutputStreamWriter
 import org.json.JSONObject
 import java.security.MessageDigest
@@ -104,11 +102,11 @@ object CaptureStore {
                 var first = true
                 CaptureDatabase.get(context).readSession(session) { message ->
                     if (!first) writer.append(',')
-                    writer.newLine()
+                    writer.append('\n')
                     writer.append(message.toJson().toString())
                     first = false
                 }
-                if (!first) writer.newLine()
+                if (!first) writer.append('\n')
                 writer.append(']')
             }
         } ?: throw IllegalStateException("تعذر فتح ملف JSON للكتابة")
