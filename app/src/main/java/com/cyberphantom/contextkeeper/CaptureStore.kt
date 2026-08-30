@@ -38,13 +38,15 @@ object CaptureStore {
         return id
     }
 
+    fun addOrUpdate(context: Context, role: String, text: String): Boolean =
+        addOrUpdate(context, currentSessionId(context), role, text)
+
     @Synchronized
-    fun addOrUpdate(context: Context, role: String, text: String): Boolean {
+    fun addOrUpdate(context: Context, sessionId: String, role: String, text: String): Boolean {
         if (!isRecording(context)) return false
         val clean = normalize(text)
         if (clean.length < MIN_TEXT_LENGTH) return false
 
-        val sessionId = currentSessionId(context)
         val id = sha256(role + "\u0000" + clean)
         return CaptureDatabase.get(context).insertOrTouch(
             sessionId = sessionId,
@@ -86,9 +88,7 @@ object CaptureStore {
         val session = currentSessionId(context)
         val out = exportDir(context).resolve("$session.json")
         val array = JSONArray()
-        CaptureDatabase.get(context).readSession(session) { message ->
-            array.put(message.toJson())
-        }
+        CaptureDatabase.get(context).readSession(session) { message -> array.put(message.toJson()) }
         out.writeText(array.toString(2), Charsets.UTF_8)
         return out
     }
