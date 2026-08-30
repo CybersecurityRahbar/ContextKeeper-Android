@@ -2,7 +2,7 @@ package com.cyberphantom.contextkeeper
 
 import android.content.Context
 import android.net.Uri
-import android.provider.DocumentsContract
+import androidx.documentfile.provider.DocumentFile
 import java.io.OutputStreamWriter
 import java.security.MessageDigest
 
@@ -76,102 +76,65 @@ object CaptureStore {
         CaptureDatabase.get(context).count(currentSessionId(context))
 
     fun exportMarkdownTo(context: Context, treeUri: Uri): Uri {
-        val session = currentSessionId(context)
-        val name = "$session.md"
-        val resolver = context.contentResolver
-        val uri = findOrCreateDocument(resolver, treeUri, name, "text/markdown")
-        resolver.openOutputStream(uri, "wt")?.use { output ->
-            OutputStreamWriter(output, Charsets.UTF_8).use { writer ->
-                writer.appendLine("# Chat Context")
+        return exportToDocument(context, treeUri, "text/markdown", "md") { writer, session ->
+            writer.appendLine("# Chat Context")
+            writer.appendLine()
+            writer.appendLine("Session: $session")
+            writer.appendLine("Generated: ${System.currentTimeMillis()}")
+            writer.appendLine()
+            CaptureDatabase.get(context).readSession(session) { message ->
+                writer.appendLine("## ${message.role}")
                 writer.appendLine()
-                writer.appendLine("Session: $session")
-                writer.appendLine("Generated: ${System.currentTimeMillis()}")
+                writer.appendLine(message.text)
                 writer.appendLine()
-                CaptureDatabase.get(context).readSession(session) { message ->
-                    writer.appendLine("## ${message.role}")
-                    writer.appendLine()
-                    writer.appendLine(message.text)
-                    writer.appendLine()
-                    writer.appendLine("---")
-                    writer.appendLine()
-                }
+                writer.appendLine("---")
+                writer.appendLine()
             }
-        } ?: throw IllegalStateException("تعذر فتح ملف Markdown للكتابة")
-        return uri
+        }
     }
 
     fun exportJsonTo(context: Context, treeUri: Uri): Uri {
-        val session = currentSessionId(context)
-        val name = "$session.json"
-        val resolver = context.contentResolver
-        val uri = findOrCreateDocument(resolver, treeUri, name, "application/json")
-        resolver.openOutputStream(uri, "wt")?.use { output ->
-            OutputStreamWriter(output, Charsets.UTF_8).use { writer ->
-                writer.append('[')
-                var first = true
-                CaptureDatabase.get(context).readSession(session) { message ->
-                    if (!first) writer.append(',')
-                    writer.append('\n')
-                    writer.append(message.toJson().toString())
-                    first = false
-                }
-                if (!first) writer.append('\n')
-                writer.append(']')
+        return exportToDocument(context, treeUri, "application/json", "json") { writer, session ->
+            writer.append('[')
+            var first = true
+            CaptureDatabase.get(context).readSession(session) { message ->
+                if (!first) writer.append(',')
+                writer.append('\n')
+                writer.append(message.toJson().toString())
+                first = false
             }
-        } ?: throw IllegalStateException("تعذر فتح ملف JSON للكتابة")
-        return uri
+            if (!first) writer.append('\n')
+            writer.append(']')
+        }
     }
 
-    private fun findOrCreateDocument(
-        resolver: android.content.ContentResolver,
+    private fun exportToDocument(
+        context: Context,
         treeUri: Uri,
-        name: String,
-        mimeType: String
+        mimeType: String,
+        extension: String,
+        writeContent: (OutputStreamWriter, String) -> Unit
     ): Uri {
-        val treeDocumentId = try {
-            DocumentsContract.getTreeDocumentId(treeUri)
-        } catch (_: Exception) {
-            throw IllegalArgumentException("URI المجلد المحدد غير صالح")
+        val session = currentSessionId(context)
+        val name = "$session.$extension"
+        val tree = DocumentFile.fromTreeUri(context, treeUri)
+            ?: throw IllegalArgumentException("المجلد المحدد غير صالح أو لم يعد متاحًا")
+        if (!tree.isDirectory || !tree.canWrite()) {
+            throw IllegalStateException("لا يمكن الكتابة إلى المجلد المحدد. اختر مجلدًا آخر.")
         }
 
-        val childUri = DocumentsContract.buildChildDocumentsUriUsingTree(
-            treeUri,
-            treeDocumentId
-        )
-        resolver.query(
-            childUri,
-            arrayOf(
-                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                DocumentsContract.Document.COLUMN_DISPLAY_NAME
-            ),
-            null,
-            null,
-            null
-        )?.use { cursor ->
-            val idColumn = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-            val nameColumn = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-            if (idColumn >= 0 && nameColumn >= 0) {
-                while (cursor.moveToNext()) {
-                    if (cursor.getString(nameColumn) == name) {
-                        return DocumentsContract.buildDocumentUriUsingTree(
-                            treeUri,
-                            cursor.getString(idColumn)
-                        )
-                    }
-                }
+        val existing = tree.findFile(name)
+        val target = existing ?: tree.createFile(mimeType, name)
+            ?: throw IllegalStateException("تعذر إنشاء الملف داخل المجلد المحدد")
+
+        context.contentResolver.openOutputStream(target.uri, "wt")?.use { output ->
+            OutputStreamWriter(output, Charsets.UTF_8).use { writer ->
+                writeContent(writer, session)
+                writer.flush()
             }
-        }
+        } ?: throw IllegalStateException("تعذر فتح الملف للكتابة")
 
-        val parentDocumentUri = DocumentsContract.buildDocumentUriUsingTree(
-            treeUri,
-            treeDocumentId
-        )
-        return DocumentsContract.createDocument(
-            resolver,
-            parentDocumentUri,
-            mimeType,
-            name
-        ) ?: throw IllegalStateException("تعذر إنشاء الملف في المجلد المحدد")
+        return target.uri
     }
 
     private fun normalize(value: String): String =
