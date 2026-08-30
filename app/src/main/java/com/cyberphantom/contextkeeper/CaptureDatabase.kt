@@ -4,7 +4,7 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 
-/** Persistent store with per-session indexed deduplication and safe streaming-response merging. */
+/** Persistent store with per-session ordering and conservative duplicate/stream merging. */
 class CaptureDatabase private constructor(context: Context) : SQLiteOpenHelper(
     context.applicationContext,
     DB_NAME,
@@ -67,7 +67,7 @@ class CaptureDatabase private constructor(context: Context) : SQLiteOpenHelper(
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_session_recent ON messages(session_id, role, last_seen_at)")
     }
 
-    fun insertOrTouch(
+    fun insertOrMerge(
         sessionId: String,
         id: String,
         role: String,
@@ -77,51 +77,29 @@ class CaptureDatabase private constructor(context: Context) : SQLiteOpenHelper(
         val db = writableDatabase
         db.beginTransaction()
         return try {
-            val exact = db.rawQuery(
-                "SELECT id FROM messages WHERE session_id = ? AND id = ? LIMIT 1",
-                arrayOf(sessionId, id)
-            ).use { it.moveToFirst() }
-
-            if (exact) {
+            val exactRecent = findRecentExact(db, sessionId, role, text, now)
+            if (exactRecent != null) {
                 db.execSQL(
                     "UPDATE messages SET last_seen_at = ? WHERE session_id = ? AND id = ?",
-                    arrayOf(now, sessionId, id)
+                    arrayOf(now, sessionId, exactRecent.id)
                 )
                 db.setTransactionSuccessful()
                 false
             } else {
                 val merge = findRecentPrefixMatch(db, sessionId, role, text, now)
                 if (merge != null) {
+                    val incoming = normalizeForCompare(text)
+                    val existing = normalizeForCompare(merge.text)
                     val mergedText = when {
-                        normalizeForCompare(text).startsWith(normalizeForCompare(merge.text)) -> text
-                        normalizeForCompare(merge.text).startsWith(normalizeForCompare(text)) -> merge.text
+                        incoming.startsWith(existing) && incoming.length > existing.length -> text
+                        existing.startsWith(incoming) && existing.length > incoming.length -> merge.text
                         else -> null
                     }
-
                     if (mergedText != null) {
-                        val mergedId = sha256(role + "\u0000" + mergedText)
-                        if (mergedId == merge.id) {
-                            db.execSQL(
-                                "UPDATE messages SET last_seen_at = ? WHERE session_id = ? AND id = ?",
-                                arrayOf(now, sessionId, merge.id)
-                            )
-                        } else {
-                            val conflicting = db.rawQuery(
-                                "SELECT id FROM messages WHERE session_id = ? AND id = ? LIMIT 1",
-                                arrayOf(sessionId, mergedId)
-                            ).use { it.moveToFirst() }
-                            if (conflicting) {
-                                db.execSQL(
-                                    "UPDATE messages SET last_seen_at = ? WHERE session_id = ? AND id = ?",
-                                    arrayOf(now, sessionId, mergedId)
-                                )
-                            } else {
-                                db.execSQL(
-                                    "UPDATE messages SET id = ?, text = ?, last_seen_at = ? WHERE session_id = ? AND id = ?",
-                                    arrayOf(mergedId, mergedText, now, sessionId, merge.id)
-                                )
-                            }
-                        }
+                        db.execSQL(
+                            "UPDATE messages SET text = ?, last_seen_at = ? WHERE session_id = ? AND id = ?",
+                            arrayOf(mergedText, now, sessionId, merge.id)
+                        )
                         db.setTransactionSuccessful()
                         true
                     } else {
@@ -140,24 +118,30 @@ class CaptureDatabase private constructor(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    private fun insertNew(
+    private fun findRecentExact(
         db: SQLiteDatabase,
         sessionId: String,
-        id: String,
         role: String,
         text: String,
         now: Long
-    ) {
-        db.execSQL(
-            "INSERT INTO messages(id, session_id, seq, role, text, first_seen_at, last_seen_at, source) VALUES(?,?,?,?,?,?,?,?)",
-            arrayOf(id, sessionId, nextSequence(db, sessionId), role, text, now, now, "android-accessibility")
-        )
+    ): CapturedMessage? {
+        return db.rawQuery(
+            "SELECT id, role, text, first_seen_at, last_seen_at, source FROM messages " +
+                "WHERE session_id = ? AND role = ? AND last_seen_at >= ? ORDER BY seq DESC LIMIT 30",
+            arrayOf(sessionId, role, (now - EXACT_WINDOW_MS).toString())
+        ).use { cursor ->
+            val incoming = normalizeForCompare(text)
+            while (cursor.moveToNext()) {
+                val candidate = CapturedMessage(
+                    id = cursor.getString(0), role = cursor.getString(1), text = cursor.getString(2),
+                    firstSeenAt = cursor.getLong(3), lastSeenAt = cursor.getLong(4), source = cursor.getString(5)
+                )
+                if (normalizeForCompare(candidate.text) == incoming) return@use candidate
+            }
+            null
+        }
     }
 
-    /**
-     * Only merge with a recent message. This is critical: a similar message
-     * typed later in the conversation must not be swallowed as a scroll duplicate.
-     */
     private fun findRecentPrefixMatch(
         db: SQLiteDatabase,
         sessionId: String,
@@ -165,47 +149,41 @@ class CaptureDatabase private constructor(context: Context) : SQLiteOpenHelper(
         text: String,
         now: Long
     ): CapturedMessage? {
-        val normalizedIncoming = normalizeForCompare(text)
-        if (normalizedIncoming.length < 64) return null
-
+        val incoming = normalizeForCompare(text)
+        if (incoming.length < MIN_MERGE_TEXT) return null
         return db.rawQuery(
             "SELECT id, role, text, first_seen_at, last_seen_at, source FROM messages " +
-                "WHERE session_id = ? AND role = ? AND last_seen_at >= ? " +
-                "ORDER BY seq DESC LIMIT 20",
+                "WHERE session_id = ? AND role = ? AND last_seen_at >= ? ORDER BY seq DESC LIMIT 20",
             arrayOf(sessionId, role, (now - MERGE_WINDOW_MS).toString())
         ).use { cursor ->
             while (cursor.moveToNext()) {
                 val candidate = CapturedMessage(
-                    id = cursor.getString(0),
-                    role = cursor.getString(1),
-                    text = cursor.getString(2),
-                    firstSeenAt = cursor.getLong(3),
-                    lastSeenAt = cursor.getLong(4),
-                    source = cursor.getString(5)
+                    id = cursor.getString(0), role = cursor.getString(1), text = cursor.getString(2),
+                    firstSeenAt = cursor.getLong(3), lastSeenAt = cursor.getLong(4), source = cursor.getString(5)
                 )
                 val existing = normalizeForCompare(candidate.text)
-                if (existing.length >= 64 &&
-                    (normalizedIncoming.startsWith(existing) || existing.startsWith(normalizedIncoming)) &&
-                    kotlin.math.abs(normalizedIncoming.length - existing.length) >= MIN_GROWTH_CHARS
-                ) {
-                    return@use candidate
-                }
+                if (existing.length >= MIN_MERGE_TEXT &&
+                    (incoming.startsWith(existing) || existing.startsWith(incoming)) &&
+                    kotlin.math.abs(incoming.length - existing.length) >= MIN_GROWTH_CHARS
+                ) return@use candidate
             }
             null
         }
     }
 
-    private fun normalizeForCompare(value: String): String = value
-        .replace('\u00A0', ' ')
-        .replace(Regex("\\s+"), " ")
-        .trim()
-        .lowercase()
+    private fun insertNew(db: SQLiteDatabase, sessionId: String, id: String, role: String, text: String, now: Long) {
+        db.execSQL(
+            "INSERT INTO messages(id, session_id, seq, role, text, first_seen_at, last_seen_at, source) VALUES(?,?,?,?,?,?,?,?)",
+            arrayOf(id, sessionId, nextSequence(db, sessionId), role, text, now, now, "android-accessibility")
+        )
+    }
+
+    private fun normalizeForCompare(value: String): String =
+        value.replace('\u00A0', ' ').replace(Regex("\\s+"), " ").trim().lowercase()
 
     fun count(sessionId: String): Int =
-        readableDatabase.rawQuery(
-            "SELECT COUNT(*) FROM messages WHERE session_id = ?",
-            arrayOf(sessionId)
-        ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
+        readableDatabase.rawQuery("SELECT COUNT(*) FROM messages WHERE session_id = ?", arrayOf(sessionId))
+            .use { if (it.moveToFirst()) it.getInt(0) else 0 }
 
     fun readSession(sessionId: String, consumer: (CapturedMessage) -> Unit) {
         readableDatabase.rawQuery(
@@ -213,36 +191,24 @@ class CaptureDatabase private constructor(context: Context) : SQLiteOpenHelper(
             arrayOf(sessionId)
         ).use { cursor ->
             while (cursor.moveToNext()) {
-                consumer(
-                    CapturedMessage(
-                        id = cursor.getString(0),
-                        role = cursor.getString(1),
-                        text = cursor.getString(2),
-                        firstSeenAt = cursor.getLong(3),
-                        lastSeenAt = cursor.getLong(4),
-                        source = cursor.getString(5)
-                    )
-                )
+                consumer(CapturedMessage(
+                    id = cursor.getString(0), role = cursor.getString(1), text = cursor.getString(2),
+                    firstSeenAt = cursor.getLong(3), lastSeenAt = cursor.getLong(4), source = cursor.getString(5)
+                ))
             }
         }
     }
 
     private fun nextSequence(db: SQLiteDatabase, sessionId: String): Long =
-        db.rawQuery(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE session_id = ?",
-            arrayOf(sessionId)
-        ).use { if (it.moveToFirst()) it.getLong(0) else 1L }
-
-    private fun sha256(value: String): String {
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
-            .digest(value.toByteArray(Charsets.UTF_8))
-        return digest.joinToString("") { "%02x".format(it) }
-    }
+        db.rawQuery("SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE session_id = ?", arrayOf(sessionId))
+            .use { if (it.moveToFirst()) it.getLong(0) else 1L }
 
     companion object {
         private const val DB_NAME = "capture.db"
         private const val DB_VERSION = 2
+        private const val EXACT_WINDOW_MS = 5 * 60 * 1000L
         private const val MERGE_WINDOW_MS = 15_000L
+        private const val MIN_MERGE_TEXT = 64
         private const val MIN_GROWTH_CHARS = 24
         @Volatile private var instance: CaptureDatabase? = null
 
