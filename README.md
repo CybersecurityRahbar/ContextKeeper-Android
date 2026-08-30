@@ -1,6 +1,6 @@
 # Context Keeper
 
-تطبيق Android أولي لحفظ سياق محادثات ChatGPT من تطبيق Android نفسه باستخدام Android Accessibility Service.
+تطبيق Android لحفظ سياق محادثات ChatGPT من تطبيق Android نفسه باستخدام Android Accessibility Service.
 
 ## الهدف
 
@@ -15,16 +15,19 @@
 
 ## التقنية
 
-- Kotlin
+- Kotlin عبر Built-in Kotlin في AGP 9.x
 - Android Gradle Plugin 9.3.0
-- Kotlin Android plugin 2.3.21
-- minSdk 26 / targetSdk 37
+- Gradle 9.5.0 في GitHub Actions
+- compileSdk 36 / targetSdk 36
+- minSdk 26
 - AccessibilityService
 - تخزين محلي ذري + SHA-256 لمنع التكرار
 
 ## البناء
 
-افتح المشروع في Android Studio Quail 3 أو أحدث ثم Sync/Build. AGP 9.3.0 مدعوم في Android Studio Quail 3.
+افتح المشروع في Android Studio حديث متوافق مع AGP 9.3.0 ثم Sync/Build.
+
+GitHub Actions يبني المشروع تلقائيًا عند كل `push` إلى `main` أو `pull request`، ويضع APK التجريبي كـ Artifact عند نجاح البناء.
 
 ## الصلاحيات
 
