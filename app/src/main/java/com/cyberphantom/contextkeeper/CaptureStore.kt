@@ -79,9 +79,8 @@ object CaptureStore {
         val session = currentSessionId(context)
         val name = "$session.md"
         val resolver = context.contentResolver
-        val uri = DocumentsContract.createDocument(resolver, treeUri, "text/markdown", name)
-            ?: throw IllegalStateException("تعذر إنشاء ملف Markdown في المجلد المحدد")
-        resolver.openOutputStream(uri)?.use { output ->
+        val uri = findOrCreateDocument(resolver, treeUri, name, "text/markdown")
+        resolver.openOutputStream(uri, "wt")?.use { output ->
             OutputStreamWriter(output, Charsets.UTF_8).use { writer ->
                 writer.appendLine("# Chat Context")
                 writer.appendLine()
@@ -105,9 +104,8 @@ object CaptureStore {
         val session = currentSessionId(context)
         val name = "$session.json"
         val resolver = context.contentResolver
-        val uri = DocumentsContract.createDocument(resolver, treeUri, "application/json", name)
-            ?: throw IllegalStateException("تعذر إنشاء ملف JSON في المجلد المحدد")
-        resolver.openOutputStream(uri)?.use { output ->
+        val uri = findOrCreateDocument(resolver, treeUri, name, "application/json")
+        resolver.openOutputStream(uri, "wt")?.use { output ->
             OutputStreamWriter(output, Charsets.UTF_8).use { writer ->
                 writer.append('[')
                 var first = true
@@ -122,6 +120,58 @@ object CaptureStore {
             }
         } ?: throw IllegalStateException("تعذر فتح ملف JSON للكتابة")
         return uri
+    }
+
+    private fun findOrCreateDocument(
+        resolver: android.content.ContentResolver,
+        treeUri: Uri,
+        name: String,
+        mimeType: String
+    ): Uri {
+        val treeDocumentId = try {
+            DocumentsContract.getTreeDocumentId(treeUri)
+        } catch (_: Exception) {
+            throw IllegalArgumentException("URI المجلد المحدد غير صالح")
+        }
+
+        val childUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+            treeUri,
+            treeDocumentId
+        )
+        resolver.query(
+            childUri,
+            arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME
+            ),
+            null,
+            null,
+            null
+        )?.use { cursor ->
+            val idColumn = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+            val nameColumn = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+            if (idColumn >= 0 && nameColumn >= 0) {
+                while (cursor.moveToNext()) {
+                    if (cursor.getString(nameColumn) == name) {
+                        return DocumentsContract.buildDocumentUriUsingTree(
+                            treeUri,
+                            cursor.getString(idColumn)
+                        )
+                    }
+                }
+            }
+        }
+
+        val parentDocumentUri = DocumentsContract.buildDocumentUriUsingTree(
+            treeUri,
+            treeDocumentId
+        )
+        return DocumentsContract.createDocument(
+            resolver,
+            parentDocumentUri,
+            mimeType,
+            name
+        ) ?: throw IllegalStateException("تعذر إنشاء الملف في المجلد المحدد")
     }
 
     private fun normalize(value: String): String =
