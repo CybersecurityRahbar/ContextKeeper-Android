@@ -19,18 +19,32 @@ class MainActivity : AppCompatActivity() {
     private lateinit var status: TextView
     private lateinit var count: TextView
     private lateinit var exportPath: TextView
-    private lateinit var toggle: Switch
+    private lateinit var recordingToggle: Switch
+    private lateinit var overlayToggle: Switch
     private val exportExecutor = Executors.newSingleThreadExecutor()
     private var pendingExport: PendingExport? = null
 
     private enum class PendingExport { MARKDOWN, JSON }
-    private companion object {
-        const val REQUEST_EXPORT_FOLDER = 4101
+
+    companion object {
+        private const val REQUEST_EXPORT_FOLDER = 4101
+        private const val ACTION_OVERLAY_CHANGED = "com.cyberphantom.contextkeeper.ACTION_OVERLAY_CHANGED"
     }
 
-    override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); buildUi() }
-    override fun onResume() { super.onResume(); refresh() }
-    override fun onDestroy() { exportExecutor.shutdownNow(); super.onDestroy() }
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        buildUi()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refresh()
+    }
+
+    override fun onDestroy() {
+        exportExecutor.shutdownNow()
+        super.onDestroy()
+    }
 
     private fun buildUi() {
         val root = LinearLayout(this).apply {
@@ -44,15 +58,26 @@ class MainActivity : AppCompatActivity() {
             text = "يلتقط نص ChatGPT أثناء الظهور والتمرير، ويحفظه تدريجيًا دون تكرار."
             textSize = 16f
         }, lp())
-        status = TextView(this).apply { textSize = 16f }; root.addView(status, lp())
-        count = TextView(this).apply { textSize = 16f }; root.addView(count, lp())
-        exportPath = TextView(this).apply { textSize = 14f }; root.addView(exportPath, lp())
+        status = TextView(this).apply { textSize = 16f }
+        root.addView(status, lp())
+        count = TextView(this).apply { textSize = 16f }
+        root.addView(count, lp())
+        exportPath = TextView(this).apply { textSize = 14f }
+        root.addView(exportPath, lp())
 
-        toggle = Switch(this).apply { text = "تشغيل التسجيل" }
-        root.addView(toggle, lp())
-        toggle.setOnCheckedChangeListener { _, checked ->
+        recordingToggle = Switch(this).apply { text = "تشغيل التسجيل" }
+        root.addView(recordingToggle, lp())
+        recordingToggle.setOnCheckedChangeListener { _, checked ->
             CaptureStore.setRecording(this@MainActivity, checked)
             if (checked) CaptureStore.newSession(this@MainActivity)
+            refresh()
+        }
+
+        overlayToggle = Switch(this).apply { text = "إظهار الزر العائم" }
+        root.addView(overlayToggle, lp())
+        overlayToggle.setOnCheckedChangeListener { _, checked ->
+            CaptureStore.setOverlayEnabled(this@MainActivity, checked)
+            sendOverlayChanged()
             refresh()
         }
 
@@ -74,7 +99,11 @@ class MainActivity : AppCompatActivity() {
         }, lp())
         root.addView(Button(this).apply {
             text = "جلسة جديدة"
-            setOnClickListener { CaptureStore.newSession(this@MainActivity); refresh() }
+            setOnClickListener {
+                CaptureStore.newSession(this@MainActivity)
+                sendOverlayChanged()
+                refresh()
+            }
         }, lp())
     }
 
@@ -82,13 +111,26 @@ class MainActivity : AppCompatActivity() {
         status.text = if (isAccessibilityServiceEnabled()) "خدمة الالتقاط: مفعلة" else "خدمة الالتقاط: غير مفعلة"
         count.text = "الرسائل المحفوظة: ${CaptureStore.messageCount(this)}"
         exportPath.text = "مجلد التصدير: ${ExportLocation.displayPath(this)}"
-        toggle.setOnCheckedChangeListener(null)
-        toggle.isChecked = CaptureStore.isRecording(this)
-        toggle.setOnCheckedChangeListener { _, checked ->
+
+        recordingToggle.setOnCheckedChangeListener(null)
+        recordingToggle.isChecked = CaptureStore.isRecording(this)
+        recordingToggle.setOnCheckedChangeListener { _, checked ->
             CaptureStore.setRecording(this@MainActivity, checked)
             if (checked) CaptureStore.newSession(this@MainActivity)
             refresh()
         }
+
+        overlayToggle.setOnCheckedChangeListener(null)
+        overlayToggle.isChecked = CaptureStore.isOverlayEnabled(this)
+        overlayToggle.setOnCheckedChangeListener { _, checked ->
+            CaptureStore.setOverlayEnabled(this@MainActivity, checked)
+            sendOverlayChanged()
+            refresh()
+        }
+    }
+
+    private fun sendOverlayChanged() {
+        sendBroadcast(Intent(ACTION_OVERLAY_CHANGED).setPackage(packageName))
     }
 
     private fun chooseExportFolder() {
@@ -108,9 +150,8 @@ class MainActivity : AppCompatActivity() {
             ExportLocation.save(this, uri)
             refresh()
             pendingExport?.let {
-                val next = it
                 pendingExport = null
-                when (next) {
+                when (it) {
                     PendingExport.MARKDOWN -> exportMarkdown()
                     PendingExport.JSON -> exportJson()
                 }
